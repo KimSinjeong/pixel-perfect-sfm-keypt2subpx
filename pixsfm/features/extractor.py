@@ -92,7 +92,8 @@ class FeatureExtractor:
                  keypoints: np.ndarray = None,
                  keypoint_ids: np.array = None,
                  as_dict: Optional[bool] = True,
-                 overwrite_sparse: Optional[bool] = None):
+                 overwrite_sparse: Optional[bool] = None,
+                 dense_scores: Optional[np.ndarray] = None):
         """
         Extract set of featuremaps for an image at image_path.
 
@@ -124,19 +125,35 @@ class FeatureExtractor:
                 'RGB', self.get_scaled_image_size(img_orig, pyr_scales[0])
             )
         fmaps = []
-        for pyr_scale in pyr_scales:
+        if dense_scores is None:
+            for pyr_scale in pyr_scales:
+                img_pyr = self.resize_image(img_orig, pyr_scale)
+                img_tens = self.model.preprocess(img_pyr).to(self.device)
+                feats = self.model(img_tens)
+
+                for i, channels in enumerate(self.model.output_dims):
+                    assert(channels == int(feats[i].shape[1]))
+
+                    fmaps.append(self.tensor_to_fmap(
+                                    feats[i], img_size,
+                                    keypoints, keypoint_ids, as_dict=as_dict,
+                                    overwrite_sparse=overwrite_sparse))
+            torch.cuda.empty_cache()
+        else: # dense_scores is not None
+            assert len(pyr_scales) == 1
+            pyr_scale = pyr_scales[0]
             img_pyr = self.resize_image(img_orig, pyr_scale)
             img_tens = self.model.preprocess(img_pyr).to(self.device)
-            feats = self.model(img_tens)
 
-            for i, channels in enumerate(self.model.output_dims):
-                assert(channels == int(feats[i].shape[1]))
-
-                fmaps.append(self.tensor_to_fmap(
-                                feats[i], img_size,
-                                keypoints, keypoint_ids, as_dict=as_dict,
-                                overwrite_sparse=overwrite_sparse))
-            torch.cuda.empty_cache()
+            # img_tens = torch.cat( # TODO: Check if the dimensions are correct
+            #     [img_tens, dense_scores.unsqueeze(0).to(img_tens.device)],
+            #     dim=1
+            # )
+            fmaps.append(self.image_to_fmap(
+                img_tens, dense_scores.unsqueeze(0).to(img_tens.device),
+                self.model, keypoints, keypoint_ids,
+                as_dict=as_dict, overwrite_sparse=overwrite_sparse
+            ))
         return fmaps
 
     def get_scaled_image_size(self, image: PIL.Image,
@@ -148,6 +165,58 @@ class FeatureExtractor:
     def resize_image(self, image: PIL.Image, pyr_scale: float):
         w_new, h_new = self.get_scaled_image_size(image, pyr_scale)
         return image.resize((w_new, h_new), self.filters[self.conf.resize])
+
+    def image_to_fmap(self, image: torch.Tensor, # 1 x 3 x H x W
+                       score: torch.Tensor = None, # 1 x 1 x H x W
+                       model: BaseModel = None,
+                       keypoints: np.ndarray = None,
+                       keypoint_ids: np.array = None,
+                       as_dict: Optional[bool] = True,
+                       overwrite_sparse: Optional[bool] = None):
+        sparse =\
+            self.conf.sparse if overwrite_sparse is None else overwrite_sparse
+        # w, h = image_size
+        ps = self.conf["patch_size"]
+
+        if keypoints is not None:
+            if keypoint_ids is None:
+                keypoint_ids = list(range(keypoints.shape[0]))
+            elif keypoints.shape[0] != len(keypoint_ids):
+                raise ValueError(
+                    "Number of provided keypoint_ids and keypoints "
+                    "do not match.")
+        
+        if sparse and keypoints is None:
+            raise RuntimeError("Cannot run sparse feature extraction " +
+                               "without any keypoints.")
+        
+        img_tens = torch.cat( # TODO: Check if the dimensions are correct
+            [image, score],
+            dim=1
+        ) # 1 x 3+1 x H x W
+        patches = np.ascontiguousarray( # N x H x W x F
+            self.model(img_tens).permute(0, 2, 3, 1).cpu().numpy())
+        
+        data = { # TODO: Check - Keypoints are integers or floats (N or N + 0.5)
+            "patches": patches,
+            "corners": ...,
+            "keypoint_ids": keypoint_ids,
+            "metadata": {
+                "scale": np.array((0.4, 0.4)), # For now, hardcoded for Keypt2Subpx
+                "is_sparse": True, # Only sparse for now
+                "patch_size": 11 # For now, hardcoded for Keypt2Subpx
+            }
+        }
+        
+        if as_dict:
+            return data
+        else:
+            return features.FeatureMap(
+                data["patches"],
+                data["keypoint_ids"],
+                data["corners"],
+                data["metadata"]
+            )
 
     def tensor_to_fmap(self, featuremap: torch.Tensor,
                        image_size: Tuple[int, int],
@@ -190,6 +259,7 @@ class FeatureExtractor:
         if sparse and better_sparse:
             # store as real sparse patches
             corners = (keypoints * scale - ps / 2.0).astype(np.int32)
+            # TODO: Here, I think [w,h] should be [featuremap.shape[3], featuremap.shape[2]]
             corners = np.clip(corners, [0, 0], np.array([w, h]) - ps - 1)
             patches = extract_patches_numpy(featuremap.squeeze(0),
                                             corners, ps)

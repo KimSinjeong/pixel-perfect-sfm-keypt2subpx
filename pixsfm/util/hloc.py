@@ -43,6 +43,15 @@ def read_keypoints_hloc(path: Path, names: Optional[Iterator[str]] = None,
             keypoint_dict[name] = keypoints.astype(np.float64)
     return keypoint_dict
 
+def read_descriptors_hloc(path: Path, names: Optional[Iterator[str]] = None) -> Dict[str, np.ndarray]:
+    descriptor_dict = {}
+    if names is None:
+        names = list_h5_names(path)
+    with h5py.File(str(path), "r") as h5f:
+        for name in names:
+            descriptors = h5f[name]["descriptors"].__array__()
+            descriptor_dict[name] = descriptors.astype(np.float64)
+    return descriptor_dict
 
 def write_keypoints_hloc(path: Path, keypoint_dict: Dict[str, np.ndarray]):
     with h5py.File(str(path), "w") as h5f:
@@ -68,3 +77,12 @@ def read_matches_hloc(path: Path, pairs: Iterator[Tuple[str]]
             matches.append(m)
             scores.append(s)
     return matches, scores
+
+def read_dense_scores(path: Path) -> Dict[str, np.ndarray]:
+    scores_dict = {}
+    names = list_h5_names(path)
+    with h5py.File(str(path), "r") as h5f:
+        for name in names:
+            dense_scores = h5f[name]["dense_scores"].__array__()
+            scores_dict[name] = dense_scores.astype(np.float64)
+    return scores_dict

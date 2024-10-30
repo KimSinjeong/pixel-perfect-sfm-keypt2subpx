@@ -87,6 +87,7 @@ class KeypointAdjuster:
         strategy_to_solver = {
             "featuremetric": FeatureMetricKeypointAdjuster,
             "topological_reference": TopologicalReferenceKeypointAdjuster,
+            "keypt2subpx": Keypt2SubpxKeypointAdjuster
         }
         strategy = conf["strategy"] if "strategy" in conf else \
             cls.default_conf["strategy"]
@@ -98,7 +99,8 @@ class KeypointAdjuster:
                graph: base.Graph,
                track_labels: List[int],
                root_labels: List[int],
-               problem_setup=None) -> dict:
+               problem_setup=None,
+               descriptors=None) -> dict:
         return NotImplementedError
 
     def refine_multilevel(self,
@@ -107,7 +109,8 @@ class KeypointAdjuster:
                           graph: base.Graph,
                           track_labels: Optional[List[int]] = None,
                           root_labels: Optional[List[int]] = None,
-                          problem_setup=None):
+                          problem_setup=None,
+                          descriptors=None):
         if track_labels is None:
             # Label graph
             track_labels = base.compute_track_labels(graph)
@@ -127,7 +130,8 @@ class KeypointAdjuster:
             out = self.refine(keypoints_dict,
                               feature_manager.fset(level_index),
                               graph, track_labels, root_labels,
-                              problem_setup=problem_setup)
+                              problem_setup=problem_setup,
+                              descriptors=descriptors)
             for k, v in out.items():
                 if k in outputs.keys():
                     outputs[k].append(v)
@@ -171,7 +175,8 @@ class FeatureMetricKeypointAdjuster(KeypointAdjuster):
                graph: base.Graph,
                track_labels: List[int],
                root_labels: List[int],
-               problem_setup: ka.KeypointAdjustmentSetup = None) -> dict:
+               problem_setup: ka.KeypointAdjustmentSetup = None,
+               descriptors=None) -> dict:
         if problem_setup is None:
             problem_setup = ka.KeypointAdjustmentSetup()
             problem_setup.set_masked_nodes_constant(graph, root_labels)
@@ -229,7 +234,8 @@ class TopologicalReferenceKeypointAdjuster(KeypointAdjuster):
                graph: base.Graph,
                track_labels: List[int],
                root_labels: List[int],
-               problem_setup: ka.KeypointAdjustmentSetup = None) -> dict:
+               problem_setup: ka.KeypointAdjustmentSetup = None,
+               descriptors=None) -> dict:
         if problem_setup is None:
             problem_setup = ka.KeypointAdjustmentSetup()
             problem_setup.set_masked_nodes_constant(graph, root_labels)
@@ -258,6 +264,67 @@ class TopologicalReferenceKeypointAdjuster(KeypointAdjuster):
                 feature_set)
         return {"summary": solver.summary()}
 
+import torch
+import torch.nn.functional as F
+
+class Keypt2SubpxKeypointAdjuster(KeypointAdjuster):
+    default_conf = deepcopy(KeypointAdjuster.default_conf)
+    default_conf["optimizer"] = {
+        **default_conf["optimizer"],
+        "num_threads": -1
+    }
+
+    def __init__(self, conf):
+        self.conf = OmegaConf.merge(self.default_conf, conf)
+
+    def refine(self,
+           keypoints_dict: base.Map_NameKeypoints,
+           feature_set: features.FeatureSet,
+           graph: base.Graph,
+           track_labels: List[int],
+           root_labels: List[int],
+           problem_setup: ka.KeypointAdjustmentSetup = None,
+           descriptors: Dict[str, np.ndarray] = {}) -> dict:
+
+        # Extract descriptors for each track and compute average descriptors
+        averaged_descriptors = {}
+        for track_id in set(track_labels):
+            track_descriptors = []
+            for node_idx, label in enumerate(track_labels):
+                if label == track_id:
+                    node = graph.nodes[node_idx]
+                    # fmap을 통해 FeatureMap에 접근 
+                    img_name = graph.image_id_to_name[node.image_id]
+                    # descriptor 데이터 얻기
+                    track_descriptors.append(torch.tensor(descriptors[img_name][node.feature_idx]))
+
+            if track_descriptors:
+                descriptors = torch.stack(track_descriptors)
+                averaged_descriptors[track_id] = torch.mean(descriptors, dim=0)
+
+        # Perform convolution with averaged descriptor for each patch
+        # refined_keypoints = {}
+        for track_id, avg_descriptor in averaged_descriptors.items():
+            for node_idx in range(len(track_labels)):
+                if track_labels[node_idx] == track_id:
+                    node = graph.nodes[node_idx]
+                    img_name = graph.image_id_to_name[node.image_id]
+                    fmap = feature_set.fmap(img_name)
+                    if fmap is not None:
+                        fpatch = fmap.fpatch(node.feature_idx)
+                        if fpatch is not None and fpatch.has_data():
+                            # patch 데이터를 tensor로 변환
+                            patch = torch.tensor(fpatch.data)
+                            patch_tensor = patch.permute(2, 0, 1).unsqueeze(0)  # P x P x F -> 1 x F x P x P
+                            descriptor_tensor = avg_descriptor.view(1, -1, 1, 1)  # F -> 1 x F x 1 x 1
+                            
+                            score_map = F.conv2d(patch_tensor, descriptor_tensor)
+                            softargmax = F.softmax(score_map.view(-1), dim=0)
+                            refined_coords = torch.sum(softargmax * torch.arange(score_map.numel()).float()) # 0 ~ 4
+                            # refined_keypoints[node_idx] = (refined_coords - 2.) * 2.5 # 0 ~ 4 -> -5 ~ 5
+                            keypoints_dict[img_name] = keypoints_dict[img_name] + (refined_coords - 2.) * 2.5 # 0 ~ 4 -> -5 ~ 5
+
+        return {"summary": "Keypt2Subpx Adjustment done!"} # TODO: Instead, directly update keypoints_dict
 
 def build_matching_graph(
         pairs: List[Tuple[str]],
