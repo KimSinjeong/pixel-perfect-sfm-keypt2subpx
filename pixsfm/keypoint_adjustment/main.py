@@ -3,12 +3,16 @@ from copy import deepcopy
 from typing import Dict, List, Tuple, Optional
 from omegaconf import OmegaConf
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import sys
 
 from .._pixsfm import _keypoint_adjustment as ka
 from .. import base, features, logger
 from ..util.misc import to_ctr, to_optim_ctr
 
+from tqdm import tqdm
 
 def find_problem_labels(track_labels: List[int], max_per_problem: int,
                         track_edge_counts: Optional[List] = None):
@@ -56,6 +60,76 @@ def find_problem_labels(track_labels: List[int], max_per_problem: int,
         raise ValueError
     return problem_labels, bins
 
+def create_meshgrid(
+        x: torch.Tensor,
+        normalized_coordinates: Optional[bool]) -> torch.Tensor:
+    assert len(x.shape) == 4, x.shape
+    _, _, height, width = x.shape
+    _device, _dtype = x.device, x.dtype
+    if normalized_coordinates:
+        xs = torch.linspace(-1.0, 1.0, width, device=_device, dtype=_dtype)
+        ys = torch.linspace(-1.0, 1.0, height, device=_device, dtype=_dtype)
+    else:
+        xs = torch.linspace(0, width - 1, width, device=_device, dtype=_dtype)
+        ys = torch.linspace(0, height - 1, height, device=_device, dtype=_dtype)
+    return torch.meshgrid(ys, xs)  # pos_y, pos_x
+
+class SpatialSoftArgmax2d(nn.Module):
+    r"""Creates a module that computes the Spatial Soft-Argmax 2D
+    of a given input heatmap.
+
+    Returns the index of the maximum 2d coordinates of the give map.
+    The output order is x-coord and y-coord.
+
+    Arguments:
+        normalized_coordinates (Optional[bool]): wether to return the
+          coordinates normalized in the range of [-1, 1]. Otherwise,
+          it will return the coordinates in the range of the input shape.
+          Default is True.
+
+    Shape:
+        - Input: :math:`(B, N, H, W)`
+        - Output: :math:`(B, N, 2)`
+
+    Examples::
+        >>> input = torch.rand(1, 4, 2, 3)
+        >>> m = tgm.losses.SpatialSoftArgmax2d()
+        >>> coords = m(input)  # 1x4x2
+        >>> x_coord, y_coord = torch.chunk(coords, dim=-1, chunks=2)
+    """
+
+    def __init__(self, normalized_coordinates: Optional[bool] = True) -> None:
+        super(SpatialSoftArgmax2d, self).__init__()
+        self.normalized_coordinates: Optional[bool] = normalized_coordinates
+        self.eps: float = 1e-6
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if not torch.is_tensor(input):
+            raise TypeError("Input input type is not a torch.Tensor. Got {}"
+                            .format(type(input)))
+        if not len(input.shape) == 4:
+            raise ValueError("Invalid input shape, we expect BxCxHxW. Got: {}"
+                             .format(input.shape))
+        # unpack shapes and create view from input tensor
+        batch_size, channels, height, width = input.shape
+        x: torch.Tensor = input.view(batch_size, channels, -1)
+
+        # compute softmax with max substraction trick
+        exp_x = torch.exp(x - torch.max(x, dim=-1, keepdim=True)[0])
+        exp_x_sum = 1.0 / (exp_x.sum(dim=-1, keepdim=True) + self.eps)
+
+        # create coordinates grid
+        pos_y, pos_x = create_meshgrid(input, self.normalized_coordinates)
+        pos_x = pos_x.reshape(-1)
+        pos_y = pos_y.reshape(-1)
+
+        # compute the expected coordinates
+        expected_y: torch.Tensor = torch.sum(
+            (pos_y * exp_x) * exp_x_sum, dim=-1, keepdim=True)
+        expected_x: torch.Tensor = torch.sum(
+            (pos_x * exp_x) * exp_x_sum, dim=-1, keepdim=True)
+        output: torch.Tensor = torch.cat([expected_x, expected_y], dim=-1)
+        return output.view(batch_size, channels, 2)  # BxNx2
 
 class KeypointAdjuster:
     default_conf = {
@@ -287,24 +361,27 @@ class Keypt2SubpxKeypointAdjuster(KeypointAdjuster):
            descriptors: Dict[str, np.ndarray] = {}) -> dict:
 
         # Extract descriptors for each track and compute average descriptors
+        print("Averaging Descriptors...", flush=True)
         averaged_descriptors = {}
-        for track_id in set(track_labels):
+        for track_id in tqdm(set(track_labels)):
             track_descriptors = []
             for node_idx, label in enumerate(track_labels):
                 if label == track_id:
                     node = graph.nodes[node_idx]
-                    # fmap을 통해 FeatureMap에 접근 
+                    # Accessing to FeatureMap via fmap
                     img_name = graph.image_id_to_name[node.image_id]
-                    # descriptor 데이터 얻기
-                    track_descriptors.append(torch.tensor(descriptors[img_name][node.feature_idx]))
+                    # Acquiring descriptor
+                    desc = torch.tensor(descriptors[img_name][:,node.feature_idx])
+                    track_descriptors.append(desc)
 
             if track_descriptors:
-                descriptors = torch.stack(track_descriptors)
-                averaged_descriptors[track_id] = torch.mean(descriptors, dim=0)
+                stacked = torch.stack(track_descriptors)
+                averaged_descriptors[track_id] = torch.mean(stacked, dim=0)
 
+        print("Keypoint Refinement...", flush=True)
+        logsoftargmax = SpatialSoftArgmax2d(False)
         # Perform convolution with averaged descriptor for each patch
-        # refined_keypoints = {}
-        for track_id, avg_descriptor in averaged_descriptors.items():
+        for track_id, avg_descriptor in tqdm(averaged_descriptors.items()):
             for node_idx in range(len(track_labels)):
                 if track_labels[node_idx] == track_id:
                     node = graph.nodes[node_idx]
@@ -313,16 +390,18 @@ class Keypt2SubpxKeypointAdjuster(KeypointAdjuster):
                     if fmap is not None:
                         fpatch = fmap.fpatch(node.feature_idx)
                         if fpatch is not None and fpatch.has_data():
-                            # patch 데이터를 tensor로 변환
+                            # convert patch data to tensor
                             patch = torch.tensor(fpatch.data)
                             patch_tensor = patch.permute(2, 0, 1).unsqueeze(0)  # P x P x F -> 1 x F x P x P
+                            scale = fpatch.scale
+
                             descriptor_tensor = avg_descriptor.view(1, -1, 1, 1)  # F -> 1 x F x 1 x 1
                             
-                            score_map = F.conv2d(patch_tensor, descriptor_tensor)
-                            softargmax = F.softmax(score_map.view(-1), dim=0)
-                            refined_coords = torch.sum(softargmax * torch.arange(score_map.numel()).float()) # 0 ~ 4
-                            # refined_keypoints[node_idx] = (refined_coords - 2.) * 2.5 # 0 ~ 4 -> -5 ~ 5
-                            keypoints_dict[img_name] = keypoints_dict[img_name] + (refined_coords - 2.) * 2.5 # 0 ~ 4 -> -5 ~ 5
+                            P = 5
+                            patch_tensor = (patch_tensor * descriptor_tensor).sum(dim=1).view(1, 1, P, P)
+                            refined_coords = ((logsoftargmax(patch_tensor) - 2.) * 2.5)[0][0].cpu().numpy() # 0 ~ 4 -> -5 ~ 5, 1 x 1 x 2
+
+                            keypoints_dict[img_name][node.feature_idx] = keypoints_dict[img_name][node.feature_idx] + refined_coords / scale
 
         return {"summary": "Keypt2Subpx Adjustment done!"} # TODO: Instead, directly update keypoints_dict
 

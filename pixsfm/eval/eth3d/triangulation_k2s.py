@@ -162,7 +162,7 @@ if __name__ == '__main__':
         '--tag', default="pixsfm", help="Run name.")
     parser.add_argument(
         '--config', type=parse_config_path,
-        default="pixsfm_eth3d",
+        default="pixsfm_eth3d_k2s",
         help="Path to the YAML configuration file or the name "
              f"a default config among {list(default_configs)}.")
     parser.add_argument(

@@ -5,7 +5,7 @@ An implementation of
 Adapted from https://github.com/KimSinjeong/keypt2subpx
 """
 
-from typing import List
+from typing import List, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -73,15 +73,20 @@ class AttnTuner(nn.Module):
             patch = (patch * scale).sum(self.feat_axis, keepdim=True)
         x = torch.cat([patch, scorepatch], self.feat_axis) if self.use_score else patch
 
+        original_dtype = x.dtype
+        original_device = 'cpu'
+        model_dtype = next(self.parameters()).dtype
+        model_device = next(self.parameters()).device
+
         # Shared Encoder
-        x = self.relu(self.conv1a(x))
+        x = self.relu(self.conv1a(x.to(device=model_device, dtype=model_dtype)))
         x = self.relu(self.conv1b(x))
         x = self.relu(self.conv2a(x))
         x = self.relu(self.conv2b(x))
         x = self.conv3(x)
         x = F.normalize(x, p=2, dim=self.feat_axis)
 
-        return x.view(B, N, self.c3, P, P) # B x N x F x P x P
+        return x.view(B, N, self.c3, P, P).to(device=original_device, dtype=original_dtype) # B x N x F x P x P
         # x = (x * desc).sum(dim=self.feat_axis).view(B, N, P, P) # Cosine similarity (in [-1, 1])    
 
         # coord = self.logsoftargmax(x) - (P-1)/2.
@@ -139,7 +144,7 @@ class K2SCNN(BaseModel):
     def _init(self, conf):
         assert conf.pretrained in ['k2scnn', None]
         self.encoder = Keypt2Subpx()
-        layers = self.encoder.children()
+        layers = list(self.encoder.children())
 
         self.output_dims = [self.conf.output_dim] # No multiscale support
         self.scales = []
@@ -159,13 +164,15 @@ class K2SCNN(BaseModel):
                 path.parent.mkdir(exist_ok=True)
                 subprocess.call(["wget", self.url, "-q"],
                                 cwd=path.parent)
-            state_dict = torch.load(path, map_location='cpu')['state_dict']
+            state_dict = torch.load(path, map_location='cpu')['model']
             params = self.state_dict()  # @TODO: Check why these two lines fail
             state_dict = {k: v for k, v in state_dict.items()
                           if k in params.keys() and v.shape == params[k].shape}
             self.load_state_dict(state_dict, strict=False)
 
-    def _forward(self, image: torch.Tensor) -> List[torch.Tensor]:
-        assert image.shape[0] == 1, "Batch size must be 1"
-        assert image.shape[1] == 4, "Image concatenated with score must have 4 channels"
-        return [self.encoder(image)]
+    def _forward(self, image: Dict[str, torch.Tensor]) -> List[torch.Tensor]:
+        keypoints = image['keypoints']
+        img_score = image['images']
+        assert img_score.shape[0] == 1, "Batch size must be 1"
+        assert img_score.shape[1] == 4, "Image concatenated with score must have 4 channels"
+        return self.encoder(keypoints, img_score[0])

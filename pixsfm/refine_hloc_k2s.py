@@ -12,7 +12,7 @@ from .util.misc import to_colmap_coordinates, to_hloc_coordinates
 from .util.hloc import (
     read_keypoints_hloc, write_keypoints_hloc,
     read_matches_hloc, read_image_pairs,
-    read_dense_scores, read_descriptor_hloc
+    read_dense_scores, read_descriptors_hloc
 )
 
 try:
@@ -84,7 +84,7 @@ class PixSfM(PixSfM_colmap):
         descriptors = None
         if 'superpoint' in features_path.name:
             dense_scores = read_dense_scores(features_path)
-            descriptors = read_descriptor_hloc(features_path)
+            descriptors = read_descriptors_hloc(features_path)
         to_colmap_coordinates(keypoints)
         pairs = read_image_pairs(pairs_path)
         matches_scores = read_matches_hloc(matches_path, pairs)

@@ -1,4 +1,5 @@
 dense_features:
+    dtype: "double"
     model:
         name: "k2scnn"
     sparse : True
@@ -8,13 +9,13 @@ mapping:
     dense_features: ${..dense_features}
     KA:
         apply: true
-        strategy: "featuremetric"
+        strategy: "keypt2subpx"
         level_indices: null
         max_kps_per_problem: 50
         optimizer:
             print_summary: false
     BA:
-        apply: true
+        apply: false
         strategy: "feature_reference"
         repeats: 1
         level_indices: null

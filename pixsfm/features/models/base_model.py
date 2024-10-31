@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from typing import List
+from typing import List, Union, Dict
 from abc import ABCMeta, abstractmethod
 from omegaconf import OmegaConf
 import PIL
@@ -34,7 +34,7 @@ class BaseModel(nn.Module, metaclass=ABCMeta):
             assert(len(self.output_dims) == len(self.scales))
 
     @torch.no_grad()
-    def forward(self, image: torch.Tensor) -> List[torch.Tensor]:
+    def forward(self, image: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> List[torch.Tensor]:
         """Given batches of images return list of featuremaps."""
         return self._forward(image)
 

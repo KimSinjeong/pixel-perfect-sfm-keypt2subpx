@@ -149,8 +149,9 @@ class FeatureExtractor:
             #     [img_tens, dense_scores.unsqueeze(0).to(img_tens.device)],
             #     dim=1
             # )
+            # print("dense_scores.shape", dense_scores.shape)
             fmaps.append(self.image_to_fmap(
-                img_tens, dense_scores.unsqueeze(0).to(img_tens.device),
+                img_tens, img_size, torch.from_numpy(dense_scores[np.newaxis,np.newaxis,:,:]).to(img_tens.device),
                 self.model, keypoints, keypoint_ids,
                 as_dict=as_dict, overwrite_sparse=overwrite_sparse
             ))
@@ -167,6 +168,7 @@ class FeatureExtractor:
         return image.resize((w_new, h_new), self.filters[self.conf.resize])
 
     def image_to_fmap(self, image: torch.Tensor, # 1 x 3 x H x W
+                       image_size: Tuple[int, int],
                        score: torch.Tensor = None, # 1 x 1 x H x W
                        model: BaseModel = None,
                        keypoints: np.ndarray = None,
@@ -175,7 +177,10 @@ class FeatureExtractor:
                        overwrite_sparse: Optional[bool] = None):
         sparse =\
             self.conf.sparse if overwrite_sparse is None else overwrite_sparse
-        # w, h = image_size
+        w, h = image_size
+        h_new, w_new = image.shape[2:]
+        scale = np.array((w_new / w, h_new / h))
+        
         ps = self.conf["patch_size"]
 
         if keypoints is not None:
@@ -190,19 +195,24 @@ class FeatureExtractor:
             raise RuntimeError("Cannot run sparse feature extraction " +
                                "without any keypoints.")
         
+        if score.shape[2] < image.shape[2]:
+            score = torch.cat([score, torch.zeros(1, 1, image.shape[2] - score.shape[2], score.shape[3], device=score.device)], dim=2)
+        if score.shape[3] < image.shape[3]:
+            score = torch.cat([score, torch.zeros(1, 1, score.shape[2], image.shape[3] - score.shape[3], device=score.device)], dim=3)
+
         img_tens = torch.cat( # TODO: Check if the dimensions are correct
             [image, score],
             dim=1
         ) # 1 x 3+1 x H x W
         patches = np.ascontiguousarray( # N x H x W x F
-            self.model(img_tens).permute(0, 2, 3, 1).cpu().numpy())
+            self.model({'keypoints': torch.from_numpy(keypoints), 'images': img_tens}).permute(0, 2, 3, 1).cpu().numpy())
         
         data = { # TODO: Check - Keypoints are integers or floats (N or N + 0.5)
             "patches": patches,
-            "corners": ...,
+            "corners": np.array([[0.0, 0.0]] * len(keypoints)),
             "keypoint_ids": keypoint_ids,
             "metadata": {
-                "scale": np.array((0.4, 0.4)), # For now, hardcoded for Keypt2Subpx
+                "scale": scale,
                 "is_sparse": True, # Only sparse for now
                 "patch_size": 11 # For now, hardcoded for Keypt2Subpx
             }
