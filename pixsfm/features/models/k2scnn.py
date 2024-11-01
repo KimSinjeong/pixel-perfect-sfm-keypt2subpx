@@ -139,7 +139,7 @@ class K2SCNN(BaseModel):
         'pretrained': 'k2scnn',
     }
 
-    url = "https://github.com/KimSinjeong/keypt2subpx/tree/master/pretrained/k2s_spsg_pretrained.pth"
+    url = "https://github.com/KimSinjeong/keypt2subpx/raw/master/pretrained/k2s_spsg_pretrained.pth"
 
     def _init(self, conf):
         assert conf.pretrained in ['k2scnn', None]
