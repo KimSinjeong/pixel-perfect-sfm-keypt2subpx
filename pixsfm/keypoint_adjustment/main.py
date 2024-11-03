@@ -13,6 +13,7 @@ from .. import base, features, logger
 from ..util.misc import to_ctr, to_optim_ctr
 
 from tqdm import tqdm
+import time
 
 def find_problem_labels(track_labels: List[int], max_per_problem: int,
                         track_edge_counts: Optional[List] = None):
@@ -360,51 +361,109 @@ class Keypt2SubpxKeypointAdjuster(KeypointAdjuster):
            problem_setup: ka.KeypointAdjustmentSetup = None,
            descriptors: Dict[str, np.ndarray] = {}) -> dict:
 
+        avg_type = 'l2'
+
         # Extract descriptors for each track and compute average descriptors
         print("Summing Descriptors...", flush=True)
-        averaged_descriptors = {k:None for k in set(track_labels)}
-        num_descriptors = {k:0 for k in set(track_labels)}
+        if avg_type == 'l1':
+            averaged_descriptors = {k:[] for k in set(track_labels)}
 
-        for node_idx, label in enumerate(tqdm(track_labels)):
-            node = graph.nodes[node_idx]
-            # Accessing to FeatureMap via fmap
-            img_name = graph.image_id_to_name[node.image_id]
-            # Acquiring descriptor
-            desc = torch.tensor(descriptors[img_name][:,node.feature_idx])
-            if averaged_descriptors[label] is None:
-                averaged_descriptors[label] = desc
-            else:
-                averaged_descriptors[label] += desc
+            for node_idx, label in enumerate(tqdm(track_labels)):
+                node = graph.nodes[node_idx]
+                # Accessing to FeatureMap via fmap
+                img_name = graph.image_id_to_name[node.image_id]
+                averaged_descriptors[label].append(descriptors[img_name][:,node.feature_idx])
 
-            num_descriptors[label] += 1
-        
-        print("Averaging...", flush=True)
-        for label in tqdm(averaged_descriptors.keys()):
-            averaged_descriptors[label] /= num_descriptors[label]
+            print("Averaging...", flush=True)
+            for label in tqdm(averaged_descriptors.keys()):
+                averaged_descriptors[label] = torch.tensor(np.median(averaged_descriptors[label], axis=0))
+
+        else: # avg_type == 'l2'
+            averaged_descriptors = {k:None for k in set(track_labels)}
+            num_descriptors = {k:0 for k in set(track_labels)}
+
+            for node_idx, label in enumerate(tqdm(track_labels)):
+                node = graph.nodes[node_idx]
+                # Accessing to FeatureMap via fmap
+                img_name = graph.image_id_to_name[node.image_id]
+                # Acquiring descriptor
+                desc = torch.tensor(descriptors[img_name][:,node.feature_idx])
+                if averaged_descriptors[label] is None:
+                    averaged_descriptors[label] = desc
+                else:
+                    averaged_descriptors[label] += desc
+
+                num_descriptors[label] += 1
+            
+            print("Averaging...", flush=True)
+            for label in tqdm(averaged_descriptors.keys()):
+                averaged_descriptors[label] /= num_descriptors[label]
         
         print("Keypoint Refinement...", flush=True)
         logsoftargmax = SpatialSoftArgmax2d(False)
         # Perform convolution with averaged descriptor for each patch
-        for node_idx, track_id in enumerate(tqdm(track_labels)):
+        # for node_idx, track_id in enumerate(tqdm(track_labels)):
+        #     avg_descriptor = averaged_descriptors[track_id]
+        #     node = graph.nodes[node_idx]
+        #     img_name = graph.image_id_to_name[node.image_id]
+        #     fmap = feature_set.fmap(img_name)
+        #     if fmap is not None:
+        #         fpatch = fmap.fpatch(node.feature_idx)
+        #         if fpatch is not None and fpatch.has_data():
+        #             # convert patch data to tensor
+        #             patch = torch.tensor(fpatch.data)
+        #             patch_tensor = patch.permute(2, 0, 1).unsqueeze(0) # P x P x F -> 1 x F x P x P
+        #             scale = fpatch.scale
+
+        #             descriptor_tensor = avg_descriptor.view(1, -1, 1, 1) # F -> 1 x F x 1 x 1
+                    
+        #             P = 5
+        #             patch_tensor = (patch_tensor * descriptor_tensor).sum(dim=1).view(1, 1, P, P)
+        #             refined_coords = ((logsoftargmax(patch_tensor) - 2.) * 2.5)[0][0].cpu().numpy() # 0 ~ 4 -> -5 ~ 5, 1 x 1 x 2
+
+        #             keypoints_dict[img_name][node.feature_idx] += refined_coords / scale
+
+        # Batching Preparation
+        P = 5
+        patches = []
+        descriptors = []
+        scales = []
+        nodes = []
+        start_time = time.time()
+
+        # Batch Collection
+        for node_idx, track_id in enumerate(track_labels):
             avg_descriptor = averaged_descriptors[track_id]
             node = graph.nodes[node_idx]
             img_name = graph.image_id_to_name[node.image_id]
             fmap = feature_set.fmap(img_name)
+            
             if fmap is not None:
                 fpatch = fmap.fpatch(node.feature_idx)
+                
                 if fpatch is not None and fpatch.has_data():
-                    # convert patch data to tensor
-                    patch = torch.tensor(fpatch.data)
-                    patch_tensor = patch.permute(2, 0, 1).unsqueeze(0)  # P x P x F -> 1 x F x P x P
-                    scale = fpatch.scale
-
-                    descriptor_tensor = avg_descriptor.view(1, -1, 1, 1)  # F -> 1 x F x 1 x 1
+                    # 필요한 데이터 수집
+                    patch = torch.tensor(fpatch.data).permute(2, 0, 1).unsqueeze(0)
+                    descriptor_tensor = avg_descriptor.view(1, -1, 1, 1)
                     
-                    P = 5
-                    patch_tensor = (patch_tensor * descriptor_tensor).sum(dim=1).view(1, 1, P, P)
-                    refined_coords = ((logsoftargmax(patch_tensor) - 2.) * 2.5)[0][0].cpu().numpy() # 0 ~ 4 -> -5 ~ 5, 1 x 1 x 2
+                    patches.append(patch)
+                    descriptors.append(descriptor_tensor)
+                    scales.append(fpatch.scale)
+                    nodes.append((img_name, node.feature_idx))
 
-                    keypoints_dict[img_name][node.feature_idx] = keypoints_dict[img_name][node.feature_idx] + refined_coords / scale
+        # Batch Calculation
+        if patches:
+            patches_tensor = torch.cat(patches, dim=0)
+            descriptors_tensor = torch.cat(descriptors, dim=0)
+            scaled_patches = (patches_tensor * descriptors_tensor).sum(dim=1).view(-1, 1, P, P)
+            refined_coords_batch = ((logsoftargmax(scaled_patches) - 2.) * 2.5).cpu().numpy()
+
+            # Reflecting adjustment
+            for i, (img_name, feature_idx) in enumerate(nodes):
+                keypoints_dict[img_name][feature_idx] += (refined_coords_batch[i] / scales[i]).reshape((2, ))
+        
+        time_lapse = time.time() - start_time
+        print(f"Took: {time_lapse} seconds")
 
         return {"summary": "Keypt2Subpx Adjustment done!"}
 

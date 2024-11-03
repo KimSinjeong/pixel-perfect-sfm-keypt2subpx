@@ -1,0 +1,16 @@
+dense_features:
+    model:
+        name: "image"
+    max_edge : 1024
+mapping:
+    dense_features: ${..dense_features}
+    KA:
+        apply: false
+    BA:
+        apply: false
+localization:
+    dense_features: ${..dense_features}
+    QKA:
+        apply: false
+    QBA:
+        apply: false

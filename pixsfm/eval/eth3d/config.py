@@ -24,7 +24,7 @@ INDOOR = [
 SCENES = OUTDOOR + INDOOR
 
 preprocessing = {
-    'resize_max': 1600,
+    'resize_max': 1024,
     'interpolation': 'cv2_area',  # TODO: change to pil_linear
 }
 feature_configs = {
