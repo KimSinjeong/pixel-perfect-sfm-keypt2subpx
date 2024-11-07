@@ -15,7 +15,17 @@ mapping:
         optimizer:
             print_summary: false
     BA:
-        apply: false
+        apply: true
+        strategy: "feature_reference"
+        repeats: 1
+        level_indices: null
+        optimizer:
+            solver:
+                max_num_iterations: 10
+            print_summary: true
+            refine_focal_length: false
+            refine_extra_params: false
+            refine_extrinsics: false
 localization:
     dense_features: ${..dense_features}
     target_reference: "nearest"

@@ -54,12 +54,12 @@ class PixSfM(PixSfM_colmap):
                 **hloc_args)
 
         reconstruction = pycolmap.Reconstruction(str(model_path))
-        # if self.conf.BA.apply:
-        #     reconstruction, ba_data, feature_manager = self.run_ba(
-        #             reconstruction, image_dir,
-        #             cache_path=cache_path, feature_manager=feature_manager)
-        # else:
-        ba_data = None
+        if self.conf.BA.apply:
+            reconstruction, ba_data, feature_manager = self.run_ba(
+                    reconstruction, image_dir,
+                    cache_path=cache_path, feature_manager=feature_manager)
+        else:
+            ba_data = None
 
         reconstruction.write(str(output_dir))
 

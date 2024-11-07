@@ -10,6 +10,7 @@
 namespace pixsfm {
 
 #define FEATURE_REFERENCE_CASES          \
+  REGISTER_METHOD(256, 1)                \
   REGISTER_METHOD(128, 1)                \
   REGISTER_METHOD(64, 1)                 \
   REGISTER_METHOD(3, 1)                  \

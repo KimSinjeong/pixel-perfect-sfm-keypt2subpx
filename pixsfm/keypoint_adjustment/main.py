@@ -361,7 +361,7 @@ class Keypt2SubpxKeypointAdjuster(KeypointAdjuster):
            problem_setup: ka.KeypointAdjustmentSetup = None,
            descriptors: Dict[str, np.ndarray] = {}) -> dict:
 
-        avg_type = 'l2'
+        avg_type = 'l1'
 
         # Extract descriptors for each track and compute average descriptors
         print("Summing Descriptors...", flush=True)
@@ -442,7 +442,6 @@ class Keypt2SubpxKeypointAdjuster(KeypointAdjuster):
                 fpatch = fmap.fpatch(node.feature_idx)
                 
                 if fpatch is not None and fpatch.has_data():
-                    # 필요한 데이터 수집
                     patch = torch.tensor(fpatch.data).permute(2, 0, 1).unsqueeze(0)
                     descriptor_tensor = avg_descriptor.view(1, -1, 1, 1)
                     
@@ -456,7 +455,8 @@ class Keypt2SubpxKeypointAdjuster(KeypointAdjuster):
             patches_tensor = torch.cat(patches, dim=0)
             descriptors_tensor = torch.cat(descriptors, dim=0)
             scaled_patches = (patches_tensor * descriptors_tensor).sum(dim=1).view(-1, 1, P, P)
-            refined_coords_batch = ((logsoftargmax(scaled_patches) - 2.) * 2.5).cpu().numpy()
+            # refined_coords_batch = ((logsoftargmax(scaled_patches) - 2.) * 2.5).cpu().numpy()
+            refined_coords_batch = (logsoftargmax(scaled_patches) - 2.).cpu().numpy()
 
             # Reflecting adjustment
             for i, (img_name, feature_idx) in enumerate(nodes):

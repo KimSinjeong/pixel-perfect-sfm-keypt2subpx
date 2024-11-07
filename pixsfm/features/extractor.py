@@ -207,14 +207,17 @@ class FeatureExtractor:
         patches = np.ascontiguousarray( # N x H x W x F
             self.model({'keypoints': torch.from_numpy(keypoints), 'images': img_tens}).permute(0, 2, 3, 1).cpu().numpy())
         
-        data = { # TODO: Check - Keypoints are integers or floats (N or N + 0.5)
+        corners = (keypoints * scale - 2.).astype(np.int32)
+        data = { # Keypoints are at original image's scale
             "patches": patches,
-            "corners": np.array([[0.0, 0.0]] * len(keypoints)),
+            # "corners": np.array([[0.0, 0.0]] * len(keypoints)),
+            "corners": corners,
             "keypoint_ids": keypoint_ids,
             "metadata": {
-                "scale": scale,
+                "scale": scale * 0.4,
                 "is_sparse": True, # Only sparse for now
-                "patch_size": 11 # For now, hardcoded for Keypt2Subpx
+                # "patch_size": 11 # For now, hardcoded for Keypt2Subpx
+                "patch_size": 5 # For now, hardcoded for Keypt2Subpx
             }
         }
         
